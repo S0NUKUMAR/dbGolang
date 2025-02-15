@@ -1,6 +1,5 @@
 package main
 
-
 import (
 	"database/sql"
 	"encoding/json"
@@ -9,12 +8,7 @@ import (
 	"os"
 	_ "github.com/lib/pq"
 	"github.com/gorilla/mux"
-	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
 )
-
-
 
 type User struct {
 	Id int `json:"id"`
@@ -22,51 +16,27 @@ type User struct {
 	Email string `json:"email"`
 }
 
-func main() {
-	log.Println("Starting application...")
-
-	// Load environment variables
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		log.Fatal("DATABASE_URL environment variable is not set")
-	}
-
-	// Connect to the database
-	db, err := sql.Open("postgres", dbURL)
-	if err != nil {
+func main(){
+	log.Println("db based example")
+	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
+	if err!= nil{
 		log.Fatal(err)
 	}
 	defer db.Close()
 
-	// Run migrations
-	driver, err := postgres.WithInstance(db, &postgres.Config{})
-	if err != nil {
+	_, err = db.Exec("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT, email TEXT)")
+	if err!=nil{
 		log.Fatal(err)
 	}
 
-	m, err := migrate.NewWithDatabaseInstance(
-		"database.sql", // Path to migration files
-		"postgres", driver,
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
+	log.Println("DB created")
+	router:= mux.NewRouter()
 
-	// Apply migrations
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		log.Fatal(err)
-	}
-	log.Println("Migrations applied successfully")
-
-	// Set up routes
-	router := mux.NewRouter()
 	router.HandleFunc("/users", getUsers(db)).Methods("GET")
 	router.HandleFunc("/users", createUser(db)).Methods("POST")
-
+	
 	log.Fatal(http.ListenAndServe(":8000", httpMiddleware(router)))
 }
-
-// Rest of your code...
 
 
 func httpMiddleware(next http.Handler) http.Handler {
