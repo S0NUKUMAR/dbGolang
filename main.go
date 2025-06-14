@@ -1,88 +1,136 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	_ "github.com/lib/pq"
+
 	"github.com/gorilla/mux"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 type User struct {
-	Id int `json:"id"`
-	Name string `json:"name"`
+	ID    uint   `json:"id" gorm:"primaryKey;autoIncrement"`
+	Name  string `json:"name"`
 	Email string `json:"email"`
 }
 
-func main(){
-	log.Println("db based example")
-	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
-	if err!= nil{
-		log.Fatal(err)
+var db *gorm.DB
+
+func main() {
+	// Use environment variables for DB connection, fallback to defaults
+	host := os.Getenv("DB_HOST")
+	if host == "" {
+		host = "localhost"
 	}
-	defer db.Close()
-
-	_, err = db.Exec("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT, email TEXT)")
-	if err!=nil{
-		log.Fatal(err)
+	user := os.Getenv("DB_USER")
+	if user == "" {
+		user = "postgres"
+	}
+	password := os.Getenv("DB_PASSWORD")
+	if password == "" {
+		password = "postgres"
+	}
+	dbname := os.Getenv("DB_NAME")
+	if dbname == "" {
+		dbname = "postgres"
+	}
+	port := os.Getenv("DB_PORT")
+	if port == "" {
+		port = "5432"
 	}
 
-	log.Println("DB created")
-	router:= mux.NewRouter()
+	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=Asia/Kolkata", host, user, password, dbname, port)
+	var err error
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		log.Fatalf("failed to connect database: %v", err)
+	}
 
-	router.HandleFunc("/users", getUsers(db)).Methods("GET")
-	router.HandleFunc("/users", createUser(db)).Methods("POST")
-	
+	// Migrate the schema
+	db.AutoMigrate(&User{})
+
+	router := mux.NewRouter()
+	router.HandleFunc("/users", getUsers).Methods("GET")
+	router.HandleFunc("/users", createUser).Methods("POST")
+	router.HandleFunc("/users/{id}", updateUser).Methods("PUT")
+	router.HandleFunc("/users/{id}", deleteUser).Methods("DELETE")
+
+	log.Println("Server started on :8000")
 	log.Fatal(http.ListenAndServe(":8000", httpMiddleware(router)))
 }
 
-
 func httpMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter , r *http.Request){
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		next.ServeHTTP(w,r)
+		next.ServeHTTP(w, r)
 	})
 }
 
-func getUsers(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter , r *http.Request){
-		rows , err := db.Query("SELECT * FROM users")
-		if err!=nil {
-			//TODO : fix this problem 
-			log.Fatal(err)
-		}
-		defer rows.Close()
-
-		users:= []User{}
-		for rows.Next() {
-			var u User 
-			if err:= rows.Scan(&u.Id, &u.Name , &u.Email); err!=nil{
-				log.Fatal(err)
-			}
-			users = append(users, u)
-		}
-		if err:= rows.Err(); err!=nil{
-			log.Fatal(err)
-		}
-		json.NewEncoder(w).Encode(users)
+func getUsers(w http.ResponseWriter, r *http.Request) {
+	var users []User
+	if err := db.Find(&users).Error; err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
 	}
+	json.NewEncoder(w).Encode(users)
 }
 
-
-
-func createUser(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var user User
-		json.NewDecoder(r.Body).Decode(&user)
-		
-		var id int
-		err:= db.QueryRow("INSERT INTO users (name , email) VALUES ($1, $2) RETURNING id", user.Name, user.Email).Scan(&id)
-		if err!=nil {
-			log.Fatal(err)
-		}
-		user.Id = id
-		json.NewEncoder(w).Encode(user)
+func createUser(w http.ResponseWriter, r *http.Request) {
+	var user User
+	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		return
 	}
+	if err := db.Create(&user).Error; err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(user)
+}
+
+func updateUser(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	var user User
+	if err := db.First(&user, params["id"]).Error; err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User not found"})
+		return
+	}
+	var updatedUser User
+	if err := json.NewDecoder(r.Body).Decode(&updatedUser); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		return
+	}
+	user.Name = updatedUser.Name
+	user.Email = updatedUser.Email
+	if err := db.Save(&user).Error; err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(user)
+}
+
+func deleteUser(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	var user User
+	if err := db.First(&user, params["id"]).Error; err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User not found"})
+		return
+	}
+	if err := db.Delete(&user).Error; err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"message": "User deleted"})
 }
