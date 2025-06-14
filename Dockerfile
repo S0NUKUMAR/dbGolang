@@ -2,11 +2,12 @@ FROM golang:1.23.2
 
 WORKDIR /app
 
+COPY go.mod go.sum ./
+RUN go mod download
+
 COPY . .
 
-RUN go get -d -v ./...
-
-RUN go build -o api .
+RUN go build -o api ./cmd/main.go
 
 EXPOSE 8000
 
