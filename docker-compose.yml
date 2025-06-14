@@ -17,7 +17,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: postgres
+      POSTGRES_DB: app_db
     ports:
       - "5432:5432"
   test_db:
@@ -37,7 +37,7 @@ services:
       - DB_PORT=5432
       - DB_USER=postgres
       - DB_PASSWORD=postgres
-      - DB_NAME=postgres
+      - DB_NAME=app_db
     depends_on:
       - db
   

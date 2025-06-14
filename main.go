@@ -6,7 +6,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -18,7 +20,14 @@ type User struct {
 	Email string `json:"email"`
 }
 
+type Product struct {
+	ID    uint   `json:"id" gorm:"primaryKey;autoIncrement"`
+	Name  string `json:"name"`
+	Price uint   `json:"price"`
+}
+
 var db *gorm.DB
+var jwtKey []byte
 
 func main() {
 	// Use environment variables for DB connection, fallback to defaults
@@ -43,6 +52,13 @@ func main() {
 		port = "5432"
 	}
 
+	// Get JWT secret from environment variable
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		jwtSecret = "your_secret_key"
+	}
+	jwtKey = []byte(jwtSecret)
+
 	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=Asia/Kolkata", host, user, password, dbname, port)
 	var err error
 	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
@@ -51,16 +67,103 @@ func main() {
 	}
 
 	// Migrate the schema
-	db.AutoMigrate(&User{})
+	db.AutoMigrate(&User{}, &Product{})
 
 	router := mux.NewRouter()
-	router.HandleFunc("/users", getUsers).Methods("GET")
-	router.HandleFunc("/users", createUser).Methods("POST")
-	router.HandleFunc("/users/{id}", updateUser).Methods("PUT")
-	router.HandleFunc("/users/{id}", deleteUser).Methods("DELETE")
+
+	// Auth routes (no middleware)
+	router.HandleFunc("/login", login).Methods("POST")
+	router.HandleFunc("/register", register).Methods("POST")
+	router.HandleFunc("/logout", logout).Methods("POST")
+
+	router.HandleFunc("/products", JWTMiddleware(getProducts)).Methods("GET")
+	router.HandleFunc("/products", JWTMiddleware(createProduct)).Methods("POST")
+	router.HandleFunc("/products/{id}", JWTMiddleware(updateProduct)).Methods("PUT")
+	router.HandleFunc("/products/{id}", JWTMiddleware(deleteProduct)).Methods("DELETE")
 
 	log.Println("Server started on :8000")
 	log.Fatal(http.ListenAndServe(":8000", httpMiddleware(router)))
+}
+
+func login(w http.ResponseWriter, r *http.Request) {
+	var user User
+	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		return
+	}
+	// Create a token for the user
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub": user.ID,
+		"exp": time.Now().Add(time.Minute * 1).Unix(),
+		"iat": time.Now().Unix(),
+	})
+	tokenString, err := token.SignedString(jwtKey)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	// Set the token in the cookie (optional)
+	http.SetCookie(w, &http.Cookie{
+		Name:     "token",
+		Value:    tokenString,
+		Expires:  time.Now().Add(1 * time.Minute),
+		Path:     "/",
+		HttpOnly: true,
+	})
+	//send the login success message
+	json.NewEncoder(w).Encode(map[string]string{"message": "User logged in successfully"})
+}
+
+func register(w http.ResponseWriter, r *http.Request) {
+	var user User
+	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		return
+	}
+	//check if the user already exists
+	if err := db.Where("email = ?", user.Email).First(&user).Error; err == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User already exists"})
+		return
+	}
+	if err := db.Create(&user).Error; err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"message": "User registered successfully"})
+}
+
+func logout(w http.ResponseWriter, r *http.Request) {
+	// Clear the token from the cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:    "token",
+		Value:   "",
+		Expires: time.Now().Add(-time.Hour * 24),
+	})
+	json.NewEncoder(w).Encode(map[string]string{"message": "User logged out successfully"})
+}
+
+func JWTMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("token")
+		if err != nil {
+			http.Error(w, "Missing token", http.StatusUnauthorized)
+			return
+		}
+		tokenStr := cookie.Value
+		token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+			return jwtKey, nil
+		})
+		if err != nil || !token.Valid {
+			http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func httpMiddleware(next http.Handler) http.Handler {
@@ -70,67 +173,77 @@ func httpMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func getUsers(w http.ResponseWriter, r *http.Request) {
-	var users []User
-	if err := db.Find(&users).Error; err != nil {
+func getProducts(w http.ResponseWriter, r *http.Request) {
+	var products []Product
+	if err := db.Find(&products).Error; err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	json.NewEncoder(w).Encode(users)
+	json.NewEncoder(w).Encode(products)
 }
 
-func createUser(w http.ResponseWriter, r *http.Request) {
-	var user User
-	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+func createProduct(w http.ResponseWriter, r *http.Request) {
+	var product Product
+
+	if err := json.NewDecoder(r.Body).Decode(&product); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
 		return
 	}
-	if err := db.Create(&user).Error; err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	json.NewEncoder(w).Encode(user)
-}
 
-func updateUser(w http.ResponseWriter, r *http.Request) {
-	params := mux.Vars(r)
-	var user User
-	if err := db.First(&user, params["id"]).Error; err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": "User not found"})
-		return
-	}
-	var updatedUser User
-	if err := json.NewDecoder(r.Body).Decode(&updatedUser); err != nil {
+	//strictly check the request payload
+	if product.Name == "" || product.Price == 0 {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
 		return
 	}
-	user.Name = updatedUser.Name
-	user.Email = updatedUser.Email
-	if err := db.Save(&user).Error; err != nil {
+
+	//create the product
+	if err := db.Create(&product).Error; err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	json.NewEncoder(w).Encode(user)
+	json.NewEncoder(w).Encode(product)
 }
 
-func deleteUser(w http.ResponseWriter, r *http.Request) {
+func updateProduct(w http.ResponseWriter, r *http.Request) {
 	params := mux.Vars(r)
-	var user User
-	if err := db.First(&user, params["id"]).Error; err != nil {
+	var product Product
+	if err := db.First(&product, params["id"]).Error; err != nil {
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": "User not found"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Product not found"})
 		return
 	}
-	if err := db.Delete(&user).Error; err != nil {
+	var updatedProduct Product
+	if err := json.NewDecoder(r.Body).Decode(&updatedProduct); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request payload"})
+		return
+	}
+	product.Name = updatedProduct.Name
+	product.Price = updatedProduct.Price
+	if err := db.Save(&product).Error; err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]string{"message": "User deleted"})
+	json.NewEncoder(w).Encode(product)
+}
+
+func deleteProduct(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	var product Product
+	if err := db.First(&product, params["id"]).Error; err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Product not found"})
+		return
+	}
+	if err := db.Delete(&product).Error; err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"message": "Product deleted"})
 }
